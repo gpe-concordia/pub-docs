@@ -174,7 +174,13 @@
             h1 { font-size: 1.5em; }
             table { font-size: 0.8em; display: block; overflow-x: auto; }
         }
+
+        /* ===== Added Oct 2026: floating Prev/Next bar beside the current search match ===== */
+        #match-bar { display: none; position: absolute; z-index: 1001; background: #fff; border: 1px solid #800000; border-radius: 6px; padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); font-size: 0.9em; align-items: center; gap: 6px; }
+        #match-bar button { padding: 4px 10px; cursor: pointer; }
     </style>
+    <!-- Concordia AEM iframe auto-height (from concordia.ca/web/design/components/iframe.html). Do not remove. -->
+    <script type="text/javascript" src="https://www.concordia.ca/etc/designs/concordia/clientlibs/vendor/iframe-resizer/js/iframeResizer.contentWindow.min.js"></script>
 </head>
 <body>
 	
@@ -190,7 +196,7 @@
   <nav id="toc-column">
         <div id="search-container">
             <div class="search-row">
-                <input type="text" id="search-input" placeholder="Find in page..." onkeypress="if(event.key==='Enter') performSearch()">
+                <input type="search" id="search-input" placeholder="Find in page..." aria-label="Find in page" onkeypress="if(event.key==='Enter') performSearch()">
                 <button class="search-btn" onclick="performSearch()">Find</button>
             </div>
             <div class="search-row" id="nav-controls" style="display:none; justify-content: space-between; margin-top: 8px;">
@@ -200,7 +206,7 @@
                     <button class="search-btn" onclick="jumpNext()">Next ↓</button>
                 </div>
             </div>
-            <div id="search-info"></div>
+            <div id="search-info" aria-live="polite"></div>
         </div>
 
         <h2>Table of Contents</h2>
@@ -706,10 +712,71 @@
 </div>
 
 <div style="text-align: right; margin-top: 20px; padding-right: 20px;">
-    <time datetime="2026-09-10">Updated Sep 10, 2026 Ver 8.1</time>
+    <time datetime="2026-10-29">Updated Oct 29, 2026 Ver 8.2</time>
+</div>
+
+<div id="match-bar" role="toolbar" aria-label="Search results">
+    <span id="match-count"></span>
+    <button onclick="jumpPrev()">&#9650; Prev</button>
+    <button onclick="jumpNext()">&#9660; Next</button>
+    <button onclick="clearHighlights(false)" aria-label="Close search">&#10005;</button>
 </div>
 
 <script>
+/* =====================================================================
+   SCROLLING HELPERS (added Oct 2026 - same fix as the Grad Handbook)
+   On concordia.ca the iframe grows to the full height of this page
+   (iframe-resizer, loaded in <head>), so THIS page no longer scrolls -
+   the concordia.ca page does. Every jump (contents links, Back to Top,
+   search results) asks the parent page to scroll. window.parentIFrame
+   only exists when the page is inside the Concordia iframe; when the
+   page is opened directly on GitHub, normal scrolling is used.
+   ===================================================================== */
+const SCROLL_OFFSET = 20;   // space (px) left above a heading after a jump
+
+function inResizedIframe() {
+    return typeof window.parentIFrame !== 'undefined' && window.parentIFrame !== null;
+}
+
+function pageTop(el) {
+    return el.getBoundingClientRect().top + window.scrollY;
+}
+
+// Scroll so that "el" is near the top of the visible screen
+function scrollToElement(el, extraOffset) {
+    const y = Math.max(0, pageTop(el) - SCROLL_OFFSET - (extraOffset || 0));
+    if (inResizedIframe()) {
+        window.parentIFrame.scrollToOffset(0, y);
+    } else {
+        window.scrollTo({ top: y, behavior: 'smooth' });
+    }
+}
+
+function backToTop() {
+    if (inResizedIframe()) {
+        window.parentIFrame.scrollToOffset(0, 0);   // top of the handbook frame
+    } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+}
+
+// Make every in-page link (#committee-membership, #top, ...) use the helpers above
+document.addEventListener('click', function (event) {
+    const link = event.target.closest('a[href^="#"]');
+    if (!link) return;
+    const id = decodeURIComponent(link.getAttribute('href').slice(1));
+    if (id === 'top') {
+        event.preventDefault();
+        backToTop();
+        return;
+    }
+    const target = document.getElementById(id);
+    if (!target) return;
+    event.preventDefault();
+    // Wait one frame so a submenu that just opened is included in the page height
+    requestAnimationFrame(function () { scrollToElement(target); });
+});
+
 function toggleSubmenu(event, submenuId) {
     const submenu = document.getElementById(submenuId);
     if (submenu) {
@@ -717,31 +784,54 @@ function toggleSubmenu(event, submenuId) {
     }
 }
 
+/* =====================================================================
+   SEARCH
+   ===================================================================== */
 let currentMatches = [];
 let currentIndex = -1;
 
+// Treat characters like . ( ) ? + as plain text, not search commands
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function performSearch() {
     clearHighlightsInternal();
+    hideMatchBar();
     const searchTerm = document.getElementById('search-input').value.trim();
     if (!searchTerm) return;
 
-    const bodyText = document.getElementById('content-column');
-    const walker = document.createTreeWalker(bodyText, NodeFilter.SHOW_TEXT, null, false);
+    const root = document.getElementById('content-column');
+    const regex = new RegExp(escapeRegExp(searchTerm), 'gi');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
     const nodesToReplace = [];
     let node;
-    while(node = walker.nextNode()) {
-        if (node.parentElement.tagName !== 'SCRIPT' && node.parentElement.tagName !== 'STYLE' && 
-            node.textContent.toLowerCase().includes(searchTerm.toLowerCase())) {
-            nodesToReplace.push(node);
-        }
+    while (node = walker.nextNode()) {
+        const tag = node.parentElement.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE') continue;
+        regex.lastIndex = 0;
+        if (regex.test(node.nodeValue)) nodesToReplace.push(node);
     }
-    nodesToReplace.forEach(node => {
-        const regex = new RegExp(`(${searchTerm})`, 'gi');
-        const span = document.createElement('span');
-        span.innerHTML = node.textContent.replace(regex, '<mark class="highlight">$1</mark>');
-        node.parentNode.replaceChild(span, node);
+
+    // Wrap each match in <mark class="highlight"> without touching the page's HTML
+    nodesToReplace.forEach(function (node) {
+        const text = node.nodeValue;
+        const fragment = document.createDocumentFragment();
+        let last = 0, match;
+        regex.lastIndex = 0;
+        while ((match = regex.exec(text)) !== null) {
+            if (match.index > last) fragment.appendChild(document.createTextNode(text.slice(last, match.index)));
+            const mark = document.createElement('mark');
+            mark.className = 'highlight';
+            mark.textContent = match[0];
+            fragment.appendChild(mark);
+            last = match.index + match[0].length;
+        }
+        if (last < text.length) fragment.appendChild(document.createTextNode(text.slice(last)));
+        node.parentNode.replaceChild(fragment, node);
     });
-    currentMatches = document.querySelectorAll('.highlight');
+
+    currentMatches = Array.from(document.querySelectorAll('.highlight'));
     if (currentMatches.length > 0) {
         document.getElementById('nav-controls').style.display = 'flex';
         currentIndex = 0;
@@ -772,11 +862,34 @@ function jumpPrev() {
 function scrollAndFocus() {
     const el = currentMatches[currentIndex];
     el.classList.add('current');
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    placeMatchBar(el);
+    // Leave room above the match so it sits roughly a third of the way down the screen
+    scrollToElement(el, 150);
+}
+
+// Show the floating Prev / Next bar just below the current match
+function placeMatchBar(el) {
+    const bar = document.getElementById('match-bar');
+    const content = document.getElementById('content-column');
+    bar.style.display = 'flex';
+    const rect = el.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    let left = rect.left + window.scrollX;
+    const maxLeft = contentRect.right + window.scrollX - bar.offsetWidth;
+    if (left > maxLeft) left = maxLeft;
+    if (left < 5) left = 5;
+    bar.style.top = (rect.bottom + window.scrollY + 8) + 'px';
+    bar.style.left = left + 'px';
+}
+
+function hideMatchBar() {
+    document.getElementById('match-bar').style.display = 'none';
 }
 
 function updateSearchInfo() {
-    document.getElementById('search-info').textContent = `${currentIndex + 1} of ${currentMatches.length} matches found.`;
+    const label = `${currentIndex + 1} of ${currentMatches.length}`;
+    document.getElementById('search-info').textContent = `${label} matches found.`;
+    document.getElementById('match-count').textContent = label;
 }
 
 function clearHighlightsInternal() {
@@ -790,13 +903,21 @@ function clearHighlightsInternal() {
     currentIndex = -1;
 }
 
-function clearHighlights() {
+// goToTop = true for the sidebar "Clear" button (original behaviour); false for the floating bar's X
+function clearHighlights(goToTop) {
     clearHighlightsInternal();
+    hideMatchBar();
     document.getElementById('search-info').textContent = "";
+    document.getElementById('match-count').textContent = "";
     document.getElementById('nav-controls').style.display = 'none';
     document.getElementById('search-input').value = "";
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (goToTop !== false) backToTop();
 }
+
+// Keep the floating bar next to its match if the screen is resized or rotated
+window.addEventListener('resize', function () {
+    if (currentMatches.length) placeMatchBar(currentMatches[currentIndex]);
+});
 </script>
 
 </body>
